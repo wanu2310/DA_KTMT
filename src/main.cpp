@@ -1,113 +1,73 @@
-#include <Arduino.h>
-#include <WiFi.h>
-#include <WiFiClient.h>
-#include <PubSubClient.h>
-#include <ArduinoJson.h>
+#include <DHT.h>
+#include <UI.h>
+#include <network.h>
+#include <Logcat.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include "esp_wpa2.h"
-WiFiClient wifiClient;
-PubSubClient client(wifiClient);
+#include "esp_heap_caps.h"
+#include "esp32-hal-psram.h"
+#include "esp32s3/spiram.h"
+#include "Hardware_Setup.h"
 
-const char* ssid = "Tai";
-const char* password = "tranmanhtai";
-const char* mqtt_server = "app.coreiot.io";
-const int mqtt_port = 1883;
-const char* mqtt_user = "iot_device_2";
-const char* mqtt_password = "YqQEjWizbSAAU5KxIKgB";
+#define DHTPIN 4      
+#define DHTTYPE DHT22  // Define the sensor 
+
+DHT dht(DHTPIN, DHTTYPE);
+
+TaskHandle_t Network; 
+TaskHandle_t Sensor;
+TaskHandle_t Led;
+TaskHandle_t UI;
 
 static const int led_pin = 2;
 
-int temp = 30;
-int humi = 50;
-int light_intensity = 100;
-float longi = 106.65789107082472;
-float lat = 10.772175109674038;
-
-void callback(char* topic, byte* payload, unsigned int length) {
-  Serial.print("Message arrived [");
-  Serial.print(topic);
-  Serial.print("] ");
-  char message[length + 1];
-  for (unsigned int i = 0; i < length; i++) {
-    message[i] = (char)payload[i];
-  }
-  message[length] = '\0';
-  Serial.println(message);
-
-  DynamicJsonDocument doc(1024);
-  DeserializationError error = deserializeJson(doc, message);
-  if (error) {
-    Serial.print(F("deserializeJson() failed: "));
-    Serial.println(error.f_str());
-    return;
-  }
-
-  const char* method = doc["method"];
-  if (strcmp(method, "setValue") == 0) {
-    bool value = doc["params"];
-    DynamicJsonDocument response(256);
-    response["value"] = value;
-    char buffer[256];
-    size_t n = serializeJson(response, buffer);
-    client.publish("v1/devices/me/attributes", buffer, n);
-  }
+void dht_setup() {
+  dht.begin();
+  Serial.println("DHT sensor is starting...");
 }
 
-void setup_wifi() {
-  Serial.println();
-  Serial.print("Connecting to ");
-  Serial.println(ssid);
-
-  WiFi.disconnect(true);
-  delay(1000);
-  WiFi.begin(ssid, password);
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-
-  Serial.println("");
-  Serial.println("WiFi connected");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
-}
-
-void reconnect() {
-  while (!client.connected()) {
-    Serial.print("Attempting MQTT connection...");
-    if (client.connect("ESP32Client", mqtt_password, nullptr)) {
-      Serial.println("connected");
-      client.subscribe("v1/devices/me/rpc/request/+");
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" try again in 5 seconds");
-      delay(1000);
-    }
-  }
-}
-void networkTask(void * parameter) {
+void uiTask(void * parameter) {
   for(;;) {
-    client.loop();
+    lv_task_handler();
+    vTaskDelay(10);
+  }
+}
+
+void sensorTask(void * parameter) {
+  for(;;) {
+    float h = dht.readHumidity();
+    float t = dht.readTemperature();
+    if (isnan(h) || isnan(t)) {
+      Serial.println("Failed to read from DHT sensor!");
+    } else {
+      Serial.print("Humidity: ");
+      Serial.print(h);
+      Serial.print(" %\t");
+      Serial.print("Temperature: ");
+      Serial.print(t);
+      Serial.println(" *C");
+    }
     DynamicJsonDocument doc(1024);
-    doc["temperature"] = temp;
-    doc["humidity"] = humi;
     doc["light"] = light_intensity;
     doc["long"] = longi;
     doc["lat"] = lat;
-
+    doc["temperature"] = t;
+    doc["humidity"] = h;
     char buffer[256];
     size_t n = serializeJson(doc, buffer);
+    light_intensity++;
+    if (light_intensity > 140) {
+      light_intensity = 100;
+    }
     client.publish("v1/devices/me/telemetry", buffer, n);
 
-    temp++;
-    humi++;
-    light_intensity++;
-    if (temp > 30) temp = 20;
-    if (humi > 70) humi = 60;
-    Serial.println("Publishing data");
+    vTaskDelay(5000);
+  }
+}
+
+void networkTask(void * parameter) {
+  for(;;) {
+    network_run();
     vTaskDelay(1000);
   }
 }
@@ -126,31 +86,55 @@ void ledtoggleTask(void * parameter) {
 }
 
 void setup() {
-  pinMode(led_pin, OUTPUT);
+  // pinMode(led_pin, OUTPUT);
   Serial.begin(115200);
-  setup_wifi();
-  client.setServer(mqtt_server, mqtt_port);
-  client.setCallback(callback);  
-  reconnect();
+  // setup_wifi();
+  // dht_setup();
+  // connect_server();
+  // reconnect();
+  check_memory();
+  hardware_setup();
+  setup_ui();
 
-  xTaskCreate(
-    networkTask,
-    "Task Network",
-    2048,
-    NULL,
-    1,
-    NULL
-  );
-  xTaskCreate(
-    ledtoggleTask,
-    "Task LED",
-    2048,
-    NULL,
-    1,
-    NULL
-  );
+  // xTaskCreate(
+  //   networkTask,
+  //   "Task Network",
+  //   2048,
+  //   NULL,
+  //   1,
+  //   &Network
+  // );
+
+  // xTaskCreate(
+  //   uiTask,
+  //   "Task UI",
+  //   409600,
+  //   NULL,
+  //   3,
+  //   &UI
+  // );
+
+  // xTaskCreate(
+  //   ledtoggleTask,
+  //   "Task LED",
+  //   2048,
+  //   NULL,
+  //   1,
+  //   &Led
+  // );
+
+  // xTaskCreate(
+  //   sensorTask,
+  //   "Task Sensor",
+  //   2048,
+  //   NULL,
+  //   2,
+  //   &Sensor
+  // );
 }
 
-void loop() {
-  delay(10000);
+void loop() {  
+  lv_task_handler();
+  delay(1000);
+  Serial.println("Loop");
 }

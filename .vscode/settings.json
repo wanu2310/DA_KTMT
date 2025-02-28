@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "esp_panellog.h": "c",
+        "esp_panel_conf_internal.h": "c",
+        "esp_panel_conf.h": "c",
+        "typeinfo": "cpp"
+    }
+}
